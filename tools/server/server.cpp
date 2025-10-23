@@ -2731,6 +2731,9 @@ struct server_context {
                 slot.prompt.tokens.clear();
 
                 res = true;
+
+                // purge slots one by one
+                break;
             }
         }
 
