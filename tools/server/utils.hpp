@@ -1081,7 +1081,7 @@ struct server_tokens {
 private: // disallow accessing these members directly, risking out-of-sync
 
     // map a **start** index in tokens to the image chunk
-    // note: the order need to be in-sync with tokens and pos
+    // note: the order need to be in-sync with tokens
     std::map<size_t, mtmd::input_chunk_ptr> map_idx_to_media;
 
     // list of tokens
@@ -1089,10 +1089,6 @@ private: // disallow accessing these members directly, risking out-of-sync
     //   otherwise, it is a normal text token
     // note: a non-text chunk can occupy multiple tokens (aka memory cells) in the token list
     llama_tokens tokens;
-
-    // the position per-token (llama_pos) in the overall input
-    // useful for M-RoPE, where the position is different from the index in tokens
-    std::vector<llama_pos> pos;
 
     // for ex. with input of 5 text tokens and 2 images (each image occupies 3 tokens and 2 pos):
     //      [0] [1] [2] [3] [4] [img0] [img0] [img0] [img1] [img1] [img1]
@@ -1124,28 +1120,21 @@ public:
     }
 
     server_tokens(const llama_tokens & tokens, bool has_mtmd) : has_mtmd(has_mtmd), tokens(tokens) {
-        for (llama_pos i = 0; i < (llama_pos)tokens.size(); ++i) {
-            pos.push_back(i);
-        }
     }
 
-    llama_pos next_pos() const {
-        if (tokens.empty()) {
-            return 0;
-        } else if (tokens.back() != LLAMA_TOKEN_NULL) {
-            return pos.back() + 1;
-        } else {
-            // find the last media chunk
-            GGML_ASSERT(has_mtmd);
-            GGML_ASSERT(!map_idx_to_media.empty());
-            const auto & chunk = map_idx_to_media.rbegin()->second;
-            return pos.back() + mtmd_input_chunk_get_n_pos(chunk.get());
+    llama_pos pos_next() const {
+        if (!has_mtmd) {
+            return tokens.size();
         }
-    }
 
-    llama_pos get_pos(size_t idx) const {
-        GGML_ASSERT(idx < pos.size());
-        return pos[idx];
+        llama_pos res = tokens.size();
+
+        for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
+            const auto & chunk = it->second;
+            res += mtmd_input_chunk_get_n_pos(chunk.get()) - mtmd_input_chunk_get_n_tokens(chunk.get());
+        }
+
+        return res;
     }
 
     // for debugging
@@ -1154,12 +1143,11 @@ public:
         oss << "tokens: ";
         for (size_t idx = 0; idx < tokens.size(); ++idx) {
             llama_token t = tokens[idx];
-            llama_pos   p = pos[idx];
             oss << "idx:" << idx << " ";
             if (t == LLAMA_TOKEN_NULL) {
-                oss << "<embd>(" << p << ")\n";
+                oss << "<embd> ";
             } else {
-                oss << t << "(" << p << ")\n";
+                oss << t << " ";
             }
         }
         oss << "\n";
@@ -1182,7 +1170,6 @@ public:
         if (tok == LLAMA_TOKEN_NULL) {
             throw std::runtime_error("Invalid token");
         }
-        pos.emplace_back(next_pos());
         tokens.emplace_back(tok);
     }
 
@@ -1192,10 +1179,8 @@ public:
         if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE || type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
             GGML_ASSERT(has_mtmd);
             const size_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
-            const llama_pos cur_pos = next_pos();
             size_t start_idx = tokens.size();
             for (size_t i = 0; i < n_tokens; ++i) {
-                pos.emplace_back(cur_pos);
                 tokens.emplace_back(LLAMA_TOKEN_NULL);
             }
             mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
@@ -1233,11 +1218,6 @@ public:
     void insert(const llama_tokens & inp_tokens) {
         GGML_ASSERT(!has_mtmd); // only allow this if mtmd is disabled
         tokens.insert(tokens.end(), inp_tokens.begin(), inp_tokens.end());
-        // rebuild the pos vector
-        pos.clear();
-        for (llama_pos i = 0; i < (llama_pos)tokens.size(); ++i) {
-            pos.emplace_back(i);
-        }
     }
 
     // for compatibility with speculative decoding, ctx shift, slot save/load
@@ -1386,6 +1366,7 @@ public:
                 llama_context * ctx,
                 mtmd_context * mctx,
                 size_t idx,
+                llama_pos n_past,
                 int32_t seq_id,
                 size_t & n_tokens_out) const {
         const auto & chunk = find_chunk(idx);
@@ -1397,7 +1378,7 @@ public:
         llama_pos new_n_past; // unused for now
         int32_t result = mtmd_helper_eval_chunk_single(mctx, ctx,
             chunk.get(),
-            pos[idx], // position
+            n_past,
             seq_id,
             n_batch,
             true, // logits last
