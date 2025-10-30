@@ -1135,7 +1135,6 @@ public:
         } else if (tokens.back() != LLAMA_TOKEN_NULL) {
             return pos.back() + 1;
         } else {
-            printf("%s", str().c_str());
             // find the last media chunk
             GGML_ASSERT(has_mtmd);
             GGML_ASSERT(!map_idx_to_media.empty());
